@@ -2,13 +2,16 @@ name: Publish
 
 # Publishes @sakoocloud/ai to the public npm registry when a v* tag is pushed.
 # Gate: typecheck + tests + tag-matches-version must pass before publish runs.
-# Requires repo secret NPM_TOKEN (an npm automation token with publish rights).
+# Auth: npm Trusted Publishing (GitHub OIDC). No NPM_TOKEN secret and no 2FA prompt; the
+# package's Trusted Publisher on npmjs.com must name sakoocloud/sakoocloud-ai + publish.yml.
+# Release: `npm run release:patch|minor|major` bumps the version and pushes the v* tag.
 on:
   push:
     tags: ["v*"]
 
 permissions:
   contents: read
+  id-token: write   # OIDC token for npm Trusted Publishing
 
 jobs:
   publish:
@@ -20,6 +23,9 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+
+      # Trusted Publishing needs npm >= 11.5.1 (Node 22 ships npm 10).
+      - run: npm install -g npm@^11.5.1
 
       - run: npm ci
 
@@ -40,5 +46,3 @@ jobs:
       # repo (it writes a public Sigstore attestation referencing repo+commit).
       # Ships dist/ + skills/ per package.json "files".
       - run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
