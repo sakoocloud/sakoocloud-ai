@@ -1,6 +1,6 @@
 {
   "name": "@sakoocloud/ai",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "type": "module",
   "description": "Give your AI coding tool full control of SakooCloud — deploy apps, provision databases, manage domains, DNS, backups, and more (PaaS + DBaaS for sakoocloud). MCP server.",
   "private": false,
