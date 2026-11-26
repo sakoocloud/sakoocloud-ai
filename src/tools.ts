@@ -1,5 +1,7 @@
 import { z, ZodRawShape } from "zod";
 import type { SakooCloudClient, EnvVar } from "@sakoocloud/sdk";
+import { domainToASCII } from "node:url";
+import { redactEnvValue, redactLogLine } from "./security.js";
 
 type Json = Record<string, unknown>;
 
@@ -9,6 +11,19 @@ interface ToolDefinition {
   inputSchema: ZodRawShape;
   handler: (client: SakooCloudClient, args: Record<string, unknown>) => Promise<unknown>;
 }
+
+const resourceId = z.string().uuid();
+const pageNumber = z.number().int().positive().max(2_147_483_647).optional();
+const pageSize = z.number().int().min(1).max(100).optional();
+const logLineCount = z.number().int().min(1).max(1000).default(100);
+const envKey = z.string().max(255).regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
+const domainName = z.string().min(1).max(253).refine((value) => {
+  if (/[\s%:/?#@\\]/.test(value)) return false;
+  const hostname = domainToASCII(value);
+  const labels = hostname.split(".");
+  return hostname.length <= 253 && labels.length >= 2 && !/^\d+$/.test(labels.at(-1) ?? "")
+    && labels.every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label));
+}, "Expected a fully qualified domain name");
 
 // Identity/regions
 const whoami: ToolDefinition = {
@@ -307,11 +322,11 @@ const deployApp: ToolDefinition = {
   description:
     "Deploy an SakooCloud app. source_type 'git' builds from the app's configured repo (optionally pin git_commit_sha); 'image' deploys a prebuilt image (image_tag); 'upload' deploys a source tarball previously uploaded via sakoocloud_get_source_upload_url (source_key). NOTE: uploading the tarball bytes is a file transfer this tool can't perform — the human must run `sakoo deploy` locally for tarball uploads.",
   inputSchema: {
-    app_id: z.string(),
+    app_id: resourceId,
     source_type: z.enum(["git", "image", "upload"]),
-    image_tag: z.string().optional(),
-    git_commit_sha: z.string().optional(),
-    source_key: z.string().optional(),
+    image_tag: z.string().min(1).max(500).optional(),
+    git_commit_sha: z.string().min(1).max(100).optional(),
+    source_key: z.string().min(1).max(500).optional(),
   },
   handler: async (client, args) => {
     const { app_id, ...input } = args as {
@@ -387,9 +402,9 @@ const promoteApp: ToolDefinition = {
 
 const redeployApp: ToolDefinition = {
   name: "sakoocloud_redeploy_app",
-  description: "Redeploy an SakooCloud app with the last deployment configuration",
+  description: "Redeploy a SakooCloud app's current built image without rebuilding",
   inputSchema: {
-    app_id: z.string(),
+    app_id: resourceId,
   },
   handler: async (client, args) => client.redeployApp(args.app_id as string),
 };
@@ -398,21 +413,28 @@ const listDeployments: ToolDefinition = {
   name: "sakoocloud_list_deployments",
   description: "List SakooCloud app deployment history",
   inputSchema: {
-    app_id: z.string(),
-    page: z.number().optional(),
-    limit: z.number().optional(),
+    app_id: resourceId,
+    page: pageNumber,
+    limit: pageSize,
   },
   handler: async (client, args) => {
     return client.getDeployments(args.app_id as string, args.page as number, args.limit as number);
   },
 };
 
+const getDeployment: ToolDefinition = {
+  name: "sakoocloud_get_deployment",
+  description: "Get a SakooCloud deployment's current status, image, timing, and failure details",
+  inputSchema: { app_id: resourceId, deploy_id: resourceId },
+  handler: async (client, args) => client.getDeployment(args.app_id as string, args.deploy_id as string),
+};
+
 const rollbackDeployment: ToolDefinition = {
   name: "sakoocloud_rollback_deployment",
-  description: "Rollback an SakooCloud app to a previous deployment",
+  description: "Roll back a SakooCloud app to the retained image of a previous successful deployment",
   inputSchema: {
-    app_id: z.string(),
-    deploy_id: z.string(),
+    app_id: resourceId,
+    deploy_id: resourceId,
   },
   handler: async (client, args) => {
     return client.rollbackDeployment(args.app_id as string, args.deploy_id as string);
@@ -433,40 +455,61 @@ const retryDeployment: ToolDefinition = {
 
 const getBuildLogs: ToolDefinition = {
   name: "sakoocloud_get_build_logs",
-  description: "Get SakooCloud app build logs for a deployment",
+  description: "Get the latest build log lines for a deployment, or read forward from an explicit cursor (0 starts at the beginning)",
   inputSchema: {
-    app_id: z.string(),
-    deploy_id: z.string(),
-    cursor: z.number().optional(),
+    app_id: resourceId,
+    deploy_id: resourceId,
+    cursor: z.number().int().nonnegative().safe().optional(),
+    lines: logLineCount,
   },
   handler: async (client, args) => {
-    return client.getBuildLogs(args.app_id as string, args.deploy_id as string, args.cursor as number);
+    const { app_id, deploy_id, cursor, lines } = args as {
+      app_id: string;
+      deploy_id: string;
+      cursor?: number;
+      lines: number;
+    };
+    // The API returns all retained lines from the cursor. Preserve unseen lines when polling.
+    const page = await client.getBuildLogs(app_id, deploy_id, cursor ?? 0);
+    const selected = cursor === undefined ? page.lines.slice(-lines) : page.lines.slice(0, lines);
+    const nextCursor = cursor === undefined ? page.cursor : cursor + selected.length;
+    return {
+      lines: selected.map(redactLogLine),
+      cursor: nextCursor,
+      done: page.done && nextCursor >= page.cursor,
+    };
   },
 };
 
 const getRuntimeLogs: ToolDefinition = {
   name: "sakoocloud_get_runtime_logs",
-  description: "Get SakooCloud app runtime logs",
+  description: "Get the latest runtime log lines from the current SakooCloud app pod",
   inputSchema: {
-    app_id: z.string(),
-    lines: z.number().optional(),
+    app_id: resourceId,
+    lines: logLineCount,
   },
   handler: async (client, args) => {
-    const lines = await client.getRuntimeLogs(args.app_id as string, args.lines as number);
-    return { lines };
+    const limit = args.lines as number;
+    const lines = await client.getRuntimeLogs(args.app_id as string, limit);
+    return { lines: lines.slice(-limit).map(redactLogLine) };
   },
 };
 
 // Env
 const getEnv: ToolDefinition = {
   name: "sakoocloud_get_env",
-  description: "Get SakooCloud app environment variables with secret values masked-only",
+  description: "List SakooCloud app environment variable names. Set include_values to true and confirm to see non-secret values.",
   inputSchema: {
-    app_id: z.string(),
+    app_id: resourceId,
+    include_values: z.boolean().optional(),
   },
   handler: async (client, args) => {
     const vars = await client.getEnv(args.app_id as string);
-    return { vars };
+    return {
+      vars: vars.map(({ key, value, is_secret }) => args.include_values === true
+        ? { key, value: redactEnvValue(key, value, is_secret) }
+        : { key }),
+    };
   },
 };
 
@@ -474,21 +517,21 @@ const setEnv: ToolDefinition = {
   name: "sakoocloud_set_env",
   description: "Set SakooCloud app environment variables",
   inputSchema: {
-    app_id: z.string(),
+    app_id: resourceId,
     vars: z.array(z.object({
-      key: z.string(),
-      value: z.string().optional(),
+      key: envKey,
+      value: z.string().max(65_536).optional(),
       is_secret: z.boolean().optional(),
       is_build_time: z.boolean().optional(),
-    })),
+    })).max(500),
   },
   handler: async (client, args) => {
-    await client.setEnv(args.app_id as string, args.vars as Array<{
-      key: string;
-      value?: string;
-      is_secret?: boolean;
-      is_build_time?: boolean;
-    }>);
+    try {
+      await client.setEnv(args.app_id as string, args.vars as EnvVar[]);
+    } catch {
+      // A validation or transport error can echo submitted values.
+      throw new Error("Could not set the app environment variables. Check app access and variable constraints.");
+    }
     return { success: true };
   },
 };
@@ -497,8 +540,8 @@ const deleteEnvVar: ToolDefinition = {
   name: "sakoocloud_delete_env_var",
   description: "Delete an SakooCloud app environment variable",
   inputSchema: {
-    app_id: z.string(),
-    key: z.string(),
+    app_id: resourceId,
+    key: envKey,
   },
   handler: async (client, args) => {
     await client.deleteEnvVar(args.app_id as string, args.key as string);
@@ -550,7 +593,7 @@ const listDomains: ToolDefinition = {
   name: "sakoocloud_list_domains",
   description: "List SakooCloud app custom domains",
   inputSchema: {
-    app_id: z.string(),
+    app_id: resourceId,
   },
   handler: async (client, args) => {
     const domains = await client.getDomains(args.app_id as string);
@@ -562,8 +605,8 @@ const addDomain: ToolDefinition = {
   name: "sakoocloud_add_domain",
   description: "Add a custom domain to an SakooCloud app",
   inputSchema: {
-    app_id: z.string(),
-    domain: z.string(),
+    app_id: resourceId,
+    domain: domainName,
   },
   handler: async (client, args) => {
     return client.addDomain(args.app_id as string, args.domain as string);
@@ -645,9 +688,9 @@ const listDatabases: ToolDefinition = {
   name: "sakoocloud_list_databases",
   description: "List SakooCloud databases (optionally filtered by project)",
   inputSchema: {
-    project_id: z.string().optional(),
-    page: z.number().optional(),
-    limit: z.number().optional(),
+    project_id: resourceId.optional(),
+    page: pageNumber,
+    limit: pageSize,
   },
   handler: async (client, args) => {
     if (args.project_id) {
@@ -703,7 +746,7 @@ const getDatabase: ToolDefinition = {
   name: "sakoocloud_get_database",
   description: "Get SakooCloud database details by ID",
   inputSchema: {
-    db_id: z.string(),
+    db_id: resourceId,
   },
   handler: async (client, args) => client.getDatabase(args.db_id as string),
 };
@@ -1010,8 +1053,8 @@ const getAppMetrics: ToolDefinition = {
   name: "sakoocloud_get_app_metrics",
   description: "Get SakooCloud app resource metrics",
   inputSchema: {
-    app_id: z.string(),
-    range: z.string().optional(),
+    app_id: resourceId,
+    range: z.string().regex(/^[1-9]\d{0,3}[hdw]$/).optional(),
   },
   handler: async (client, args) => {
     return client.getAppMetrics(args.app_id as string, args.range as string);
@@ -1681,8 +1724,11 @@ const deleteFunctionTrigger: ToolDefinition = {
 const listCrons: ToolDefinition = {
   name: "sakoocloud_list_crons",
   description: "List scheduled cron jobs for an app",
-  inputSchema: { app_id: z.string() },
-  handler: async (client, args) => client.getCrons(args.app_id as string),
+  inputSchema: { app_id: resourceId },
+  handler: async (client, args) => {
+    const crons = await client.getCrons(args.app_id as string);
+    return crons.map(({ id, appId, name, schedule, timezone, enabled }) => ({ id, appId, name, schedule, timezone, enabled }));
+  },
 };
 
 const createCron: ToolDefinition = {
@@ -2046,6 +2092,7 @@ export const tools: ToolDefinition[] = [
   promoteApp,
   // Deployments
   listDeployments,
+  getDeployment,
   rollbackDeployment,
   retryDeployment,
   getBuildLogs,

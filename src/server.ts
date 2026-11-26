@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SakooCloudClient } from "@sakoocloud/sdk";
-import { executeWithUserConfirmation, getToolAnnotations, redactSensitiveResult, requiresUserConfirmation } from "./security.js";
+import { executeWithUserConfirmation, getToolAnnotations, redactLogLine, redactSensitiveResult, requiresUserConfirmation } from "./security.js";
 import { tools } from "./tools.js";
 
 // The API's AllExceptionsFilter sends a NESTED envelope:
@@ -48,7 +48,7 @@ export function createServer(client: SakooCloudClient): McpServer {
       },
       async (args) => {
         try {
-          const result = requiresUserConfirmation(tool.name)
+          const result = requiresUserConfirmation(tool.name, args)
             ? await executeWithUserConfirmation(server.server, tool, () => tool.handler(client, args))
             : await tool.handler(client, args);
 
@@ -89,7 +89,7 @@ export function createServer(client: SakooCloudClient): McpServer {
             content: [
               {
                 type: "text" as const,
-                text: errorText,
+                text: errorText.split("\n").map(redactLogLine).join("\n"),
               },
             ],
             isError: true,

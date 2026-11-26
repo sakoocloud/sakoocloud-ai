@@ -33,7 +33,12 @@ export interface ConfirmationRequester {
   elicitInput(params: ConfirmationRequest): Promise<ConfirmationResponse>;
 }
 
-const DESTRUCTIVE_TOOL_NAME = /(delete|remove|revoke|rotate|restore|rollback|disable|stop|unlink|unassign|detach|cancel|disconnect)/;
+const DESTRUCTIVE_TOOL_NAME = /(delete|remove|revoke|rotate|restore|rollback|disable|stop|unlink|unassign|detach|cancel|disconnect|_deploy_app$|_redeploy_app$|_set_env$)/;
+const CONFIRMATION_REQUIRED_READS = new Set([
+  "sakoocloud_get_build_logs",
+  "sakoocloud_get_runtime_logs",
+  "sakoocloud_list_domains",
+]);
 const LOW_RISK_READ_ONLY_TOOLS = new Set([
   "sakoocloud_whoami",
   "sakoocloud_list_regions",
@@ -45,6 +50,8 @@ const LOW_RISK_READ_ONLY_TOOLS = new Set([
   "sakoocloud_get_app",
   "sakoocloud_list_environments",
   "sakoocloud_list_deployments",
+  "sakoocloud_get_deployment",
+  "sakoocloud_get_env",
   "sakoocloud_list_databases",
   "sakoocloud_get_database",
   "sakoocloud_get_database_versions",
@@ -92,22 +99,30 @@ const SENSITIVE_FIELD_NAMES = new Set([
   "refreshtoken",
   "accesstoken",
   "idtoken",
+  "authorization",
   "apikey",
   "privatekey",
   "connectionstring",
   "databaseurl",
+  "credentials",
+  "connectionuri",
+  "uri",
+  "publicuri",
+  "connectionuser",
+  "buildlogurl",
+  "releaseconfig",
 ]);
 
 function isReadOnlyTool(name: string): boolean {
   return LOW_RISK_READ_ONLY_TOOLS.has(name);
 }
 
-export function requiresUserConfirmation(name: string): boolean {
-  return !isReadOnlyTool(name);
+export function requiresUserConfirmation(name: string, args?: Record<string, unknown>): boolean {
+  return !isReadOnlyTool(name) || (name === "sakoocloud_get_env" && args?.include_values === true);
 }
 
 export function getToolAnnotations(name: string): ToolAnnotations {
-  if (!requiresUserConfirmation(name)) {
+  if (isReadOnlyTool(name) || CONFIRMATION_REQUIRED_READS.has(name)) {
     return { readOnlyHint: true, destructiveHint: false };
   }
 
@@ -155,6 +170,25 @@ function normalizeFieldName(name: string): string {
   return name.replace(/[-_]/g, "").toLowerCase();
 }
 
+export function redactEnvValue(key: string, value: string | null | undefined, isSecret?: boolean): string | null {
+  if (isSecret !== false || /(?:password|passphrase|secret|token|apikey|accesskey|privatekey|databaseurl|connectionstring)$/.test(normalizeFieldName(key))) {
+    return "[REDACTED]";
+  }
+  return value ?? null;
+}
+
+export function redactLogLine(line: string): string {
+  // Logs are free-form. Strip common credential forms before limiting line length.
+  return line
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\b(?:bearer|basic)\s+[^\s,;"']+/gi, "[REDACTED]")
+    .replace(/\b(authorization|cookie|set-cookie)["']?\s*[:=].*/gi, "$1: [REDACTED]")
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s/"']*@/gi, "[REDACTED]@")
+    .replace(/\bsakoo_sk_[A-Za-z0-9_-]+/g, "[REDACTED]")
+    .replace(/\b[A-Za-z0-9_-]{0,255}(?:password|passphrase|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|database[-_]?url|connection[-_]?string|x-amz-signature)[A-Za-z0-9_-]{0,255}["']?\s*[:=].*/gi, "[REDACTED]")
+    .slice(0, 2048);
+}
+
 export function redactSensitiveResult(result: unknown): unknown {
   const seen = new WeakSet<object>();
 
@@ -168,13 +202,16 @@ export function redactSensitiveResult(result: unknown): unknown {
 
     const copy: Record<string, unknown> = {};
     for (const key of Object.keys(value)) {
-      if (SENSITIVE_FIELD_NAMES.has(normalizeFieldName(key))) {
+      if (key === "__proto__") continue;
+      const field = normalizeFieldName(key);
+      if (SENSITIVE_FIELD_NAMES.has(field)) {
         copy[key] = "[REDACTED]";
         continue;
       }
 
       try {
-        copy[key] = redact(value[key]);
+        const entry = value[key];
+        copy[key] = field === "errormessage" && typeof entry === "string" ? redactLogLine(entry) : redact(entry);
       } catch {
         copy[key] = "[Unserializable]";
       }

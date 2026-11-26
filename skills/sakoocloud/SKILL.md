@@ -80,9 +80,10 @@ Confirm with `sakoocloud_whoami` — it returns the authenticated account. If it
 3. `sakoocloud_update_app` with `git_repo_url`, `git_branch`, and `git_auto_deploy: true`
    for push-to-deploy. (Needs the GitHub app connected for private repos — see below.)
 4. `sakoocloud_deploy_app` `{ app_id, source_type: "git", git_commit_sha? }`.
-5. Poll `sakoocloud_get_build_logs` `{ app_id, deploy_id, cursor }` — advance `cursor` from
-   each response until `done: true`. Then `sakoocloud_get_runtime_logs` to confirm the
-   container is healthy. The app is served at `https://<app-slug>.sakoocloud.ir`.
+5. Poll `sakoocloud_get_deployment` `{ app_id, deploy_id }` for deployment status.
+   For build diagnostics, `sakoocloud_get_build_logs` returns a bounded tail by
+   default. To read from the beginning, pass `cursor: 0` and advance it from each
+   response until `done: true`. Build and runtime log reads require confirmation.
 
 > Deploying from a **local folder** (uploading a source tarball) is **not** an MCP
 > operation — the AI can't stream file bytes. `sakoocloud_get_source_upload_url` mints the
@@ -123,9 +124,9 @@ access when the consumer is another SakooCloud app.
 - `sakoocloud_set_env` `{ app_id, vars: [{ key, value, is_secret?, is_build_time? }] }` —
   bulk upsert. Mark secrets with `is_secret: true`; mark vars needed during the build
   (e.g. during `npm run build`, not just at runtime) with `is_build_time: true`.
-- `sakoocloud_get_env` `{ app_id }` lists environment variables with secret values always
-  masked. Environment secret values never return; rotate a secret by replacing its value
-  through `sakoocloud_set_env` (write-only).
+- `sakoocloud_get_env` `{ app_id }` lists variable names. Pass `include_values: true`
+  and confirm to see non-secret values. Rotate a secret by replacing its value through
+  `sakoocloud_set_env` (write-only).
 - `sakoocloud_delete_env_var` `{ app_id, key }`. **A change to env requires a redeploy.**
 
 ### Custom domain + TLS

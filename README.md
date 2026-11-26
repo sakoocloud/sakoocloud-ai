@@ -29,7 +29,7 @@ client the same way.
 You describe what you want — "deploy this Next.js repo and give it a Postgres" — and your
 AI does it end to end: creates the project, the app, wires the git repo, provisions the
 database, links them, kicks off the build, tails the logs, and hands you the live URL.
-**166 tools** cover the whole platform.
+**167 tools** cover the whole platform.
 
 ## Prerequisites
 
@@ -163,7 +163,7 @@ No interactive login available? Set an API key in the server's environment inste
 
 ## Tools
 
-**166 tools**, all `sakoocloud_`-prefixed, grouped by resource:
+**167 tools**, all `sakoocloud_`-prefixed, grouped by resource:
 
 ### Identity & regions
 
@@ -187,12 +187,20 @@ No interactive login available? Set an API key in the server's environment inste
 
 ### Deployments & logs
 
-`list_deployments`, `rollback_deployment`, `retry_deployment`, `get_build_logs`,
+`list_deployments`, `get_deployment`, `rollback_deployment`, `retry_deployment`, `get_build_logs`,
 `get_runtime_logs`
+
+Use `get_deployment` for status, image, timing, and failure details. Both log tools
+require confirmation and return up to `lines` entries (default 100, maximum 1,000).
+Build logs default to the latest lines. Pass `cursor: 0` to read from the beginning
+and use the returned cursor until `done` is true. Runtime logs tail the current pod.
 
 ### Env vars
 
 `get_env`, `set_env`, `delete_env_var`
+
+`get_env` returns app variable names by default. With `include_values: true` and
+confirmation, it also returns values the API marks as non-secret.
 
 ### App ↔ DB links
 

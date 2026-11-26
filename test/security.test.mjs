@@ -34,7 +34,8 @@ test("tool classification defaults unknown tools to confirmation", () => {
   assert.equal(requiresUserConfirmation("sakoocloud_list_future_secrets"), true);
   assert.equal(requiresUserConfirmation("sakoocloud_get_runtime_logs"), true);
   assert.equal(requiresUserConfirmation("sakoocloud_get_function_source"), true);
-  assert.equal(requiresUserConfirmation("sakoocloud_get_env"), true);
+  assert.equal(requiresUserConfirmation("sakoocloud_get_env"), false);
+  assert.equal(requiresUserConfirmation("sakoocloud_get_env", { include_values: true }), true);
   assert.equal(requiresUserConfirmation("sakoocloud_get_project_env"), true);
   assert.equal(requiresUserConfirmation("sakoocloud_list_project_secrets"), true);
   assert.equal(requiresUserConfirmation("sakoocloud_list_api_keys"), true);
